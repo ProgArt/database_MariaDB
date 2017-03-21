@@ -1729,11 +1729,11 @@ int cat_file(DYNAMIC_STRING* ds, const char* filename)
   while((len= my_read(fd, (uchar*)&buff,
                       sizeof(buff)-1, MYF(0))) > 0)
   {
-    char *p= buff, *start= buff;
-    while (p < buff+len)
+    char *p= buff, *start= buff,*end=buff+len;
+    while (p < end)
     {
       /* Convert cr/lf to lf */
-      if (*p == '\r' && *(p+1) && *(p+1)== '\n')
+      if (*p == '\r' && p+1 < end && *(p+1)== '\n')
       {
         /* Add fake newline instead of cr and output the line */
         *p= '\n';
@@ -2490,7 +2490,7 @@ VAR *var_obtain(const char *name, int len)
 
 
 /*
-  - if variable starts with a $ it is regarded as a local test varable
+  - if variable starts with a $ it is regarded as a local test variable
   - if not it is treated as a environment variable, and the corresponding
   environment variable will be updated
 */
@@ -3325,7 +3325,7 @@ static int replace(DYNAMIC_STRING *ds_str,
   NOTE
   Although mysqltest is executed from cygwin shell, the command will be
   executed in "cmd.exe". Thus commands like "rm" etc can NOT be used, use
-  mysqltest commmand(s) like "remove_file" for that
+  mysqltest command(s) like "remove_file" for that
 */
 
 void do_exec(struct st_command *command)
@@ -3338,6 +3338,8 @@ void do_exec(struct st_command *command)
   DYNAMIC_STRING ds_sorted, *ds_result;
   DBUG_ENTER("do_exec");
   DBUG_PRINT("enter", ("cmd: '%s'", cmd));
+
+  var_set_int("$sys_errno",0);
 
   /* Skip leading space */
   while (*cmd && my_isspace(charset_info, *cmd))
@@ -3389,16 +3391,32 @@ void do_exec(struct st_command *command)
     ds_result= &ds_sorted;
   }
 
+#ifdef _WIN32
+   /* Workaround for CRT bug, MDEV-9409 */
+  _setmode(fileno(res_file), O_BINARY);
+#endif
+
   while (fgets(buf, sizeof(buf), res_file))
   {
+    int len = (int)strlen(buf);
+#ifdef _WIN32
+    /* Strip '\r' off newlines. */
+    if (len > 1 && buf[len-2] == '\r' && buf[len-1] == '\n')
+    {
+      buf[len-2] = '\n';
+      buf[len-1] = 0;
+      len--;
+    }
+#endif
     if (disable_result_log)
     {
-      buf[strlen(buf)-1]=0;
+      if (len)
+        buf[len-1] = 0;
       DBUG_PRINT("exec_result",("%s", buf));
     }
     else
     {
-      replace_dynstr_append(ds_result, buf);
+      replace_dynstr_append_mem(ds_result, buf, len);
     }
   }
   error= pclose(res_file);
@@ -3439,6 +3457,7 @@ void do_exec(struct st_command *command)
         report_or_die("command \"%s\" failed with wrong error: %d",
                       command->first_argument, status);
     }
+    var_set_int("$sys_errno",status);
   }
   else if (command->expected_errors.err[0].type == ERR_ERRNO &&
            command->expected_errors.err[0].code.errnum != 0)
@@ -5784,6 +5803,7 @@ void do_connect(struct st_command *command)
   my_bool con_shm __attribute__ ((unused))= 0;
   int read_timeout= 0;
   int write_timeout= 0;
+  int connect_timeout= 0;
   struct st_connection* con_slot;
 
   static DYNAMIC_STRING ds_connection_name;
@@ -5890,6 +5910,11 @@ void do_connect(struct st_command *command)
     {
       write_timeout= atoi(con_options + sizeof("write_timeout=")-1);
     }
+    else if (strncasecmp(con_options, "connect_timeout=",
+                         sizeof("connect_timeout=")-1) == 0)
+    {
+      connect_timeout= atoi(con_options + sizeof("connect_timeout=")-1);
+    }
     else
       die("Illegal option to connect: %.*s", 
           (int) (end - con_options), con_options);
@@ -5972,6 +5997,12 @@ void do_connect(struct st_command *command)
   {
     mysql_options(con_slot->mysql, MYSQL_OPT_WRITE_TIMEOUT,
                   (char*)&write_timeout);
+  }
+
+  if (connect_timeout)
+  {
+    mysql_options(con_slot->mysql, MYSQL_OPT_CONNECT_TIMEOUT,
+                  (char*)&connect_timeout);
   }
 
 #ifdef HAVE_SMEM
@@ -6523,7 +6554,7 @@ int read_line(char *buf, int size)
                               start_lineno));
         }
 
-        /* Skip all space at begining of line */
+        /* Skip all space at beginning of line */
 	skip_char= 1;
       }
       else if (end_of_query(c))
@@ -6535,10 +6566,10 @@ int read_line(char *buf, int size)
       }
       else if (c == '}')
       {
-        /* A "}" need to be by itself in the begining of a line to terminate */
+        /* A "}" need to be by itself in the beginning of a line to terminate */
         *p++= c;
 	*p= 0;
-        DBUG_PRINT("exit", ("Found '}' in begining of a line at line: %d",
+        DBUG_PRINT("exit", ("Found '}' in beginning of a line at line: %d",
                             cur_file->lineno));
 	DBUG_RETURN(0);
       }
@@ -7900,7 +7931,7 @@ void handle_error(struct st_command *command,
   {
     /*
       The query after a "--require" failed. This is fine as long the server
-      returned a valid reponse. Don't allow 2013 or 2006 to trigger an
+      returned a valid response. Don't allow 2013 or 2006 to trigger an
       abort_not_supported_test
     */
     if (err_errno == CR_SERVER_LOST ||
@@ -8981,7 +9012,7 @@ int main(int argc, char **argv)
   var_set_string("MYSQLTEST_FILE", cur_file->file_name);
   init_re();
 
-  /* Cursor protcol implies ps protocol */
+  /* Cursor protocol implies ps protocol */
   if (cursor_protocol)
     ps_protocol= 1;
 
@@ -9079,7 +9110,7 @@ int main(int argc, char **argv)
                               abort_on_error);
     
     /*
-      some commmands need to be executed or at least parsed unconditionally,
+      some commands need to be executed or at least parsed unconditionally,
       because they change the grammar.
     */
     ok_to_do= cur_block->ok || command->type == Q_DELIMITER
@@ -9511,7 +9542,7 @@ int main(int argc, char **argv)
     die("Test ended with parsing disabled");
 
   /*
-    The whole test has been executed _sucessfully_.
+    The whole test has been executed _successfully_.
     Time to compare result or save it to record file.
     The entire output from test is in the log file
   */
@@ -9557,7 +9588,7 @@ int main(int argc, char **argv)
 
   verbose_msg("Test has succeeded!");
   timer_output();
-  /* Yes, if we got this far the test has suceeded! Sakila smiles */
+  /* Yes, if we got this far the test has succeeded! Sakila smiles */
   cleanup_and_exit(0);
   return 0; /* Keep compiler happy too */
 }
@@ -10052,7 +10083,7 @@ void free_replace_regex()
   buf_len_p - result buffer length. Will change if the buffer is reallocated
   pattern - regexp pattern to match
   replace - replacement expression
-  string - the string to perform substituions in
+  string - the string to perform substitutions in
   icase - flag, if set to 1 the match is case insensitive
 */
 int reg_replace(char** buf_p, int* buf_len_p, char *pattern,

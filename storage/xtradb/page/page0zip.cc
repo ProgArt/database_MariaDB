@@ -1250,10 +1250,6 @@ page_zip_compress(
 	anytime. */
 	my_bool		cmp_per_index_enabled = srv_cmp_per_index_enabled;
 
-	if (!page) {
-		return(FALSE);
-	}
-
 	ut_a(page_is_comp(page));
 	ut_a(fil_page_get_type(page) == FIL_PAGE_INDEX);
 	ut_ad(page_simple_validate_new((page_t*) page));
@@ -4814,8 +4810,6 @@ page_zip_parse_compress(
 	ulint	size;
 	ulint	trailer_size;
 
-	ut_ad(ptr != NULL);
-	ut_ad(end_ptr != NULL);
 	ut_ad(!page == !page_zip);
 
 	if (UNIV_UNLIKELY(ptr + (2 + 2) > end_ptr)) {

@@ -111,9 +111,8 @@ row_merge_encrypt_buf(
 			"Unable to encrypt data-block "
 			" src: %p srclen: %lu buf: %p buflen: %d."
 			" return-code: %d. Can't continue!\n",
-			input_buf, (size_t)srv_sort_buf_size,
+			input_buf, srv_sort_buf_size,
 			crypted_buf, dstlen, rc);
-		ut_error;
 	}
 }
 
@@ -153,9 +152,8 @@ row_merge_decrypt_buf(
 			"Unable to encrypt data-block "
 			" src: %p srclen: %lu buf: %p buflen: %d."
 			" return-code: %d. Can't continue!\n",
-			input_buf, (size_t)srv_sort_buf_size,
+			input_buf, srv_sort_buf_size,
 			crypted_buf, dstlen, rc);
-		ut_error;
 	}
 
 	return true;
@@ -1065,14 +1063,8 @@ row_merge_read_rec(
 	ulint	data_size;
 	ulint	avail_size;
 
-	ut_ad(block);
-	ut_ad(buf);
 	ut_ad(b >= &block[0]);
 	ut_ad(b < &block[srv_sort_buf_size]);
-	ut_ad(index);
-	ut_ad(foffs);
-	ut_ad(mrec);
-	ut_ad(offsets);
 
 	ut_ad(*offsets == 1 + REC_OFFS_HEADER_SIZE
 	      + dict_index_get_n_fields(index));
@@ -3956,7 +3948,7 @@ row_merge_build_indexes(
 {
 	merge_file_t*		merge_files;
 	row_merge_block_t*	block;
-	row_merge_block_t*	crypt_block;
+	row_merge_block_t*	crypt_block = NULL;
 	ulint			block_size;
 	ulint			i;
 	ulint			j;
@@ -3992,16 +3984,19 @@ row_merge_build_indexes(
 		DBUG_RETURN(DB_OUT_OF_MEMORY);
 	}
 
-	/* Get crypt data from tablespace if present. */
-	crypt_data = fil_space_get_crypt_data(new_table->space);
-	crypt_block = NULL;
+	/* Get crypt data from tablespace if present. We should be protected
+	from concurrent DDL (e.g. drop table) by MDL-locks. */
+	fil_space_t* space = fil_space_acquire(new_table->space);
+
+	if (space) {
+		crypt_data = space->crypt_data;
+	} else {
+		DBUG_RETURN(DB_TABLESPACE_NOT_FOUND);
+	}
 
 	/* If tablespace is encrypted, allocate additional buffer for
 	encryption/decryption. */
-	if ((crypt_data && crypt_data->encryption == FIL_SPACE_ENCRYPTION_ON) ||
-		(srv_encrypt_tables &&
-			crypt_data && crypt_data->encryption == FIL_SPACE_ENCRYPTION_DEFAULT)) {
-
+	if (crypt_data && crypt_data->should_encrypt()) {
 		crypt_block = static_cast<row_merge_block_t*>(
 			os_mem_alloc_large(&block_size));
 
@@ -4168,6 +4163,13 @@ wait_again:
 						" exited when creating FTS"
 						" index '%s'",
 						indexes[i]->name);
+				} else {
+					for (j = 0; j < FTS_NUM_AUX_INDEX;
+					     j++) {
+
+						os_thread_join(merge_info[j]
+							       .thread_hdl);
+					}
 				}
 			} else {
 				/* This cannot report duplicates; an
@@ -4192,9 +4194,10 @@ wait_again:
 				(total_static_cost + total_dynamic_cost)
 				* PCT_COST_MERGESORT_INDEX * 100;
 
-			bufend = innobase_convert_name(buf, sizeof buf,
+			bufend = innobase_convert_name(
+				buf, sizeof buf,
 				indexes[i]->name, strlen(indexes[i]->name),
-				trx ? trx->mysql_thd : NULL,
+				trx->mysql_thd,
 				FALSE);
 
 			buf[bufend - buf]='\0';
@@ -4351,6 +4354,10 @@ func_exit:
 					MONITOR_BACKGROUND_DROP_INDEX);
 			}
 		}
+	}
+
+	if (space) {
+		fil_space_release(space);
 	}
 
 	DBUG_RETURN(error);
